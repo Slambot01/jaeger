@@ -1196,3 +1196,60 @@ func TestFindTraces_OTLPFields(t *testing.T) {
 		})
 	}
 }
+
+func BenchmarkGetDependencies(b *testing.B) {
+	for _, numSpans := range []int{10, 100, 500} {
+		b.Run(fmt.Sprintf("spans=%d", numSpans), func(b *testing.B) {
+			store, err := NewStore(Configuration{MaxTraces: 10})
+			require.NoError(b, err)
+
+			traceID := pcommon.TraceID([16]byte{0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0})
+			td := ptrace.NewTraces()
+
+			// Service A: root span + half the child spans
+			rsA := td.ResourceSpans().AppendEmpty()
+			rsA.Resource().Attributes().PutStr(conventions.ServiceNameKey, "service-a")
+			ssA := rsA.ScopeSpans().AppendEmpty()
+			rootSpan := ssA.Spans().AppendEmpty()
+			rootSpan.SetTraceID(traceID)
+			rootSpan.SetSpanID(pcommon.SpanID([8]byte{0, 0, 0, 0, 0, 0, 0, 1}))
+			startTime := time.Now()
+			rootSpan.SetStartTimestamp(pcommon.NewTimestampFromTime(startTime))
+			rootSpan.SetEndTimestamp(pcommon.NewTimestampFromTime(startTime.Add(time.Second)))
+
+			// Service B: remaining child spans, all parented to root
+			rsB := td.ResourceSpans().AppendEmpty()
+			rsB.Resource().Attributes().PutStr(conventions.ServiceNameKey, "service-b")
+			ssB := rsB.ScopeSpans().AppendEmpty()
+
+			for i := 2; i <= numSpans; i++ {
+				var parent ptrace.Span
+				if i%2 == 0 {
+					parent = ssB.Spans().AppendEmpty()
+				} else {
+					parent = ssA.Spans().AppendEmpty()
+				}
+				parent.SetTraceID(traceID)
+				parent.SetSpanID(pcommon.SpanID([8]byte{0, 0, 0, 0, 0, 0, 0, byte(i)}))
+				parent.SetParentSpanID(pcommon.SpanID([8]byte{0, 0, 0, 0, 0, 0, 0, 1}))
+				parent.SetStartTimestamp(pcommon.NewTimestampFromTime(startTime))
+				parent.SetEndTimestamp(pcommon.NewTimestampFromTime(startTime.Add(time.Second)))
+			}
+
+			err = store.WriteTraces(context.Background(), td)
+			require.NoError(b, err)
+
+			query := depstore.QueryParameters{
+				StartTime: startTime.Add(-1 * time.Hour),
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				_, err := store.GetDependencies(context.Background(), query)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}

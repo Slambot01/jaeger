@@ -172,6 +172,18 @@ func (t *Tenant) getDependencies(query depstore.QueryParameters) ([]model.Depend
 		if !traceWithTime.traceIsBetweenStartAndEnd(query.StartTime, query.EndTime) {
 			continue
 		}
+		// Build spanID → serviceName index in one O(n) pass instead of
+		// doing an O(n) linear scan per span via findServiceNameWithSpanId,
+		// which made the overall complexity O(n²).
+		spanToService := make(map[pcommon.SpanID]string)
+		for _, resourceSpan := range traceWithTime.trace.ResourceSpans().All() {
+			serviceName := getServiceNameFromResource(resourceSpan.Resource())
+			for _, scopeSpan := range resourceSpan.ScopeSpans().All() {
+				for _, span := range scopeSpan.Spans().All() {
+					spanToService[span.SpanID()] = serviceName
+				}
+			}
+		}
 		for _, resourceSpan := range traceWithTime.trace.ResourceSpans().All() {
 			for _, scopeSpan := range resourceSpan.ScopeSpans().All() {
 				for _, span := range scopeSpan.Spans().All() {
@@ -179,7 +191,7 @@ func (t *Tenant) getDependencies(query depstore.QueryParameters) ([]model.Depend
 						continue
 					}
 					spanServiceName := getServiceNameFromResource(resourceSpan.Resource())
-					parentSpanServiceName, found := findServiceNameWithSpanId(traceWithTime.trace, span.ParentSpanID())
+					parentSpanServiceName, found := spanToService[span.ParentSpanID()]
 					if !found {
 						continue
 					}
@@ -202,19 +214,6 @@ func (t *Tenant) getDependencies(query depstore.QueryParameters) ([]model.Depend
 		retMe = append(retMe, *dep)
 	}
 	return retMe, nil
-}
-
-func findServiceNameWithSpanId(trace ptrace.Traces, spanId pcommon.SpanID) (string, bool) {
-	for _, resourceSpan := range trace.ResourceSpans().All() {
-		for _, scopeSpan := range resourceSpan.ScopeSpans().All() {
-			for _, span := range scopeSpan.Spans().All() {
-				if span.SpanID() == spanId {
-					return getServiceNameFromResource(resourceSpan.Resource()), true
-				}
-			}
-		}
-	}
-	return "", false
 }
 
 func validTrace(td ptrace.Traces, query tracestore.TraceQueryParams) bool {
